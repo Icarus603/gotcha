@@ -1,0 +1,17 @@
+[llm]
+provider = "openai"
+model = "gpt-4o"
+max_tokens = 2000
+temperature = 0.2
+
+[search]
+providers = ["tavily"]
+max_results = 30
+
+[concurrency]
+search = 4
+fetch = 6
+extract = 6
+summarize = 2
+compose = 1
+
