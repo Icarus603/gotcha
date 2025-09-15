@@ -93,8 +93,9 @@ func runSessionSelector(sessionManager *session.Manager) (string, error) {
     }
 
     if len(sessions) == 0 {
-        fmt.Println("No existing sessions found. Creating new session...")
-        return sessionManager.CreateNewSession()
+        fmt.Println("Nothing to resume from - no existing sessions found.")
+        fmt.Println("Use 'gotcha' to start a new session.")
+        return "", nil // Return empty string to indicate no session selected
     }
 
     // Create session selector UI

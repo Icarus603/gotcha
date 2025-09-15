@@ -57,4 +57,7 @@ var (
         BorderForeground(lipgloss.Color("#4C4C4C")).
         Padding(0, 1)
     ChatTitle = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
+
+    // Command indicator style (matches slash command dropdown)
+    CommandIndicator = lipgloss.NewStyle().Foreground(colorLightBlue)
 )

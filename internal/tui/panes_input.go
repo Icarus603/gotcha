@@ -49,6 +49,8 @@ type InputPane struct {
 
     // working indicator
     indicatorFrame int
+    lastWordChange time.Time  // track when we last changed the word
+    currentWord    string // current random word
     
     // command system
     showCommands    bool
@@ -253,7 +255,7 @@ func (p InputPane) CommandDropdownView() string {
 }
 
 // Get indicator view (called from root model)
-func (p InputPane) IndicatorView() string {
+func (p *InputPane) IndicatorView() string {
     return p.renderIndicator()
 }
 
@@ -770,8 +772,15 @@ func (p *InputPane) getIndicatorText() string {
         "Moonwalking…", "Starhopping…", "Cloudweaving…", "Rainbowchasing…", "Thunderlistening…",
         "Magicspelling…", "Wizardwhistling…", "Spellcrafting…", "Enchantweaving…", "Potionbrewing…",
     }
-    // Pick random word each time
-    return texts[rand.Intn(len(texts))]
+
+    // Change word every 10-15 seconds
+    now := time.Now()
+    if now.Sub(p.lastWordChange) >= 12*time.Second || p.currentWord == "" {
+        p.lastWordChange = now
+        p.currentWord = texts[rand.Intn(len(texts))]
+    }
+
+    return p.currentWord
 }
 
 func (p *InputPane) renderIndicator() string {

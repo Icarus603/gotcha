@@ -33,7 +33,7 @@ func (m SessionSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "esc":
+		case "q":
 			m.cancelled = true
 			return m, tea.Quit
 		case "enter", " ":
@@ -121,7 +121,7 @@ func (m SessionSelector) View() string {
 		if i == m.cursor {
 			// Selected session
 			selectedStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0A82BD")).
+				Foreground(lipgloss.Color("#7BB3E0")).
 				Background(lipgloss.Color("#2D2D2D")).
 				Bold(true).
 				Padding(0, 1)
