@@ -7,3 +7,10 @@ type NewTaskMsg struct{ Title string }
 type ChatDeltaMsg struct{ Delta string }
 type ChatDoneMsg struct{}
 type ChatErrMsg struct{ Err string }
+type UserMessageMsg struct{}
+
+// Session save message
+type SaveSessionMsg struct{}
+
+// Transcript save message
+type SaveTranscriptMsg struct{}

@@ -2,23 +2,28 @@ package tui
 
 import (
     "fmt"
+    "os"
+    "path/filepath"
+    "time"
+
     tea "github.com/charmbracelet/bubbletea"
     "github.com/charmbracelet/bubbles/textarea"
     "github.com/charmbracelet/lipgloss"
-    "time"
+
     "gotcha/internal/agent"
     "gotcha/internal/app"
-    "context"
 )
 
 type NotesPane struct {
-    ta      textarea.Model
-    focused bool
-    saved   []string
-    bus     agent.EventBus
-    svc     *app.Service
+    ta        textarea.Model
+    focused   bool
+    bus       agent.EventBus
+    svc       *app.Service
     sessionID string
+    noteCount int // Counter for generating sequential note files
 }
+
+type NoteSaveResultMsg struct{ Success, Error string }
 
 func NewNotesPane(bus agent.EventBus) NotesPane {
     ta := textarea.New()
@@ -61,17 +66,19 @@ func (p *NotesPane) SetSize(paneWidth, paneHeight int) {
 
 func (p NotesPane) Update(msg tea.Msg) (NotesPane, tea.Cmd) {
     switch m := msg.(type) {
+    case NoteSaveResultMsg:
+        // Clear textarea after successful save
+        if m.Success != "" {
+            p.ta.SetValue("")
+        }
+        return p, nil
     case tea.KeyMsg:
         if !p.focused { break }
         // Enter saves; Shift+Enter inserts newline.
         if m.String() == "enter" {
             val := p.ta.Value()
             if val != "" {
-                p.saved = append(p.saved, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), val))
-                if p.svc != nil {
-                    _ = p.svc.SaveNote(context.Background(), p.sessionIDOrDefault(), val)
-                }
-                p.ta.SetValue("")
+                return p, p.saveNoteAsFile(val)
             }
             return p, nil
         }
@@ -88,11 +95,7 @@ func (p NotesPane) Update(msg tea.Msg) (NotesPane, tea.Cmd) {
 
 func (p NotesPane) View() string {
     title := NotesTitle.Render("Notes")
-    list := ""
-    for i := len(p.saved) - 1; i >= 0 && i >= len(p.saved)-3; i-- {
-        list += "\n• " + p.saved[i]
-    }
-    return title + "\n" + p.ta.View() + list
+    return title + "\n" + p.ta.View()
 }
 
 func (p NotesPane) sessionIDOrDefault() string {
@@ -107,4 +110,49 @@ func (p NotesPane) ContentLines() int {
     c := 1
     for i := 0; i < len(v); i++ { if v[i] == '\n' { c++ } }
     return c
+}
+
+// SetNoteCount sets the current note counter (for session restoration)
+func (p *NotesPane) SetNoteCount(count int) {
+    p.noteCount = count
+}
+
+// GetNoteCount returns the current note counter
+func (p *NotesPane) GetNoteCount() int {
+    return p.noteCount
+}
+
+// saveNoteAsFile saves the note content as a separate markdown file
+func (p *NotesPane) saveNoteAsFile(content string) tea.Cmd {
+    p.noteCount++
+    sessionID := p.sessionIDOrDefault()
+
+    return func() tea.Msg {
+        // Get current working directory and create .gotcha path
+        cwd, err := os.Getwd()
+        if err != nil {
+            return NoteSaveResultMsg{Error: fmt.Sprintf("Failed to get working directory: %v", err)}
+        }
+
+        sessionDir := filepath.Join(cwd, ".gotcha", "sessions", sessionID)
+        if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+            return NoteSaveResultMsg{Error: fmt.Sprintf("Failed to create session directory: %v", err)}
+        }
+
+        // Generate filename with sequential numbering
+        filename := fmt.Sprintf("note_%d.md", p.noteCount)
+        notePath := filepath.Join(sessionDir, filename)
+
+        // Create note content with timestamp header
+        noteContent := fmt.Sprintf("# Note %d\n\n**Created:** %s\n\n---\n\n%s\n",
+            p.noteCount,
+            time.Now().Format(time.RFC3339),
+            content)
+
+        if err := os.WriteFile(notePath, []byte(noteContent), 0o644); err != nil {
+            return NoteSaveResultMsg{Error: fmt.Sprintf("Failed to save note: %v", err)}
+        }
+
+        return NoteSaveResultMsg{Success: fmt.Sprintf("Note saved to %s", filename)}
+    }
 }

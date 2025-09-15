@@ -31,32 +31,6 @@ func NewOpenAI(apiKey, baseURL, model string, proxyURL string) *OpenAIClient {
 
 func (c *OpenAIClient) Name() string { return "openai" }
 
-type chatMessage struct {
-    Role    string `json:"role"`
-    Content string `json:"content"`
-}
-
-type chatReq struct {
-    Model       string        `json:"model"`
-    Messages    []chatMessage `json:"messages"`
-    MaxTokens   int           `json:"max_tokens,omitempty"`
-    Temperature float64       `json:"temperature,omitempty"`
-    Stream      bool          `json:"stream,omitempty"`
-    Stop        []string      `json:"stop,omitempty"`
-}
-
-type chatResp struct {
-    Choices []struct {
-        Index        int `json:"index"`
-        Message      chatMessage `json:"message"`
-        FinishReason string `json:"finish_reason"`
-        Delta        struct { Content string `json:"content"` } `json:"delta"`
-    } `json:"choices"`
-    Usage struct{
-        PromptTokens int `json:"prompt_tokens"`
-        CompletionTokens int `json:"completion_tokens"`
-    } `json:"usage"`
-}
 
 // Complete performs a chat completion; if onToken is non-nil, it streams deltas.
 func (c *OpenAIClient) Complete(ctx context.Context, req Request, onToken StreamHandler) (Response, error) {
@@ -67,7 +41,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request, onToken Stream
     rr := responsesReq{
         Model:                 model,
         Instructions:          strings.TrimSpace(req.System),
-        Input:                 buildResponsesInput(req.Prompt),
+        Input:                 buildResponsesInputWithHistory(req.Prompt, req.ConversationHistory),
         MaxOutputTokens:       req.MaxTokens,
         Stream:                onToken != nil,
         Stop:                  req.Stop,
@@ -112,7 +86,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request, onToken Stream
             if err2 := json.Unmarshal(data2, &r); err2 != nil { return Response{}, err2 }
             text := r.OutputText
             if text == "" { text = r.AggregateOutputText() }
-            if onToken != nil && text != "" { onToken(text) }
+            if text != "" { onToken(text) }
             return Response{Text: strings.TrimSpace(text), PromptTokens: r.Usage.InputTokens, CompletionTokens: r.Usage.OutputTokens}, nil
         }
         return Response{}, fmt.Errorf("openai: http %d: %s", resp.StatusCode, string(b))
@@ -149,23 +123,21 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request, onToken Stream
                     onToken(delta)
                 }
             case "response.tool_call.delta", "response.web_search_call.delta":
-                if onToken != nil { onToken("\x00WEBSEARCH:" + payload) }
+                onToken("\x00WEBSEARCH:" + payload)
             case "response.reasoning.delta", "response.summary.delta":
-                if onToken != nil { onToken("\x00REASON:" + parseDelta(payload)) }
+                onToken("\x00REASON:" + parseDelta(payload))
             case "response.completed":
                 // done
-                break
             case "error":
                 // Some org/model combos do not allow stream; fallback to non-stream
                 needFallback = true
                 errPayload = payload
-                break
             }
             // Fallback detection: if payload mentions web_search_call in other events
-            if onToken != nil && strings.Contains(payload, "web_search_call") {
+            if strings.Contains(payload, "web_search_call") {
                 onToken("\x00WEBSEARCH:" + payload)
             }
-            if onToken != nil && (strings.Contains(payload, "summary_text") || strings.Contains(payload, "\"type\":\"reasoning\"")) {
+            if strings.Contains(payload, "summary_text") || strings.Contains(payload, "\"type\":\"reasoning\"") {
                 onToken("\x00REASON:" + parseDelta(payload))
             }
         }
@@ -193,19 +165,13 @@ func (c *OpenAIClient) Complete(ctx context.Context, req Request, onToken Stream
         if err2 := json.Unmarshal(data2, &r); err2 != nil { return Response{}, err2 }
         text := r.OutputText
         if text == "" { text = r.AggregateOutputText() }
-        if onToken != nil && text != "" { onToken(text) }
+        if text != "" { onToken(text) }
         return Response{Text: strings.TrimSpace(text), PromptTokens: r.Usage.InputTokens, CompletionTokens: r.Usage.OutputTokens}, nil
     }
     if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) { return Response{}, err }
     return Response{Text: strings.TrimSpace(full.String())}, nil
 }
 
-func buildMessages(system, user string) []chatMessage {
-    msgs := make([]chatMessage, 0, 2)
-    if strings.TrimSpace(system) != "" { msgs = append(msgs, chatMessage{Role: "system", Content: system}) }
-    msgs = append(msgs, chatMessage{Role: "user", Content: user})
-    return msgs
-}
 
 func transportWithProxy(proxy string) http.RoundTripper {
     // Default transport copies http.DefaultTransport settings but allows proxy override.
@@ -263,7 +229,33 @@ func (r responsesResp) AggregateOutputText() string {
     return b.String()
 }
 
-func buildResponsesInput(prompt string) any { return strings.TrimSpace(prompt) }
+
+func buildResponsesInputWithHistory(prompt string, history []ConversationMessage) any {
+    if len(history) == 0 {
+        return strings.TrimSpace(prompt)
+    }
+    
+    var builder strings.Builder
+    builder.WriteString("Previous conversation:\n")
+
+    for _, msg := range history {
+        switch msg.Role {
+        case "user":
+            builder.WriteString("User: ")
+        case "assistant":
+            builder.WriteString("Assistant: ")
+        default:
+            continue // Skip tool/reason messages for API
+        }
+        builder.WriteString(msg.Text)
+        builder.WriteString("\n\n")
+    }
+    
+    builder.WriteString("Current user message: ")
+    builder.WriteString(strings.TrimSpace(prompt))
+    
+    return builder.String()
+}
 
 func parseDelta(payload string) string {
     // payload can be a JSON object {"delta":"..."} or a raw string
@@ -282,3 +274,5 @@ func supportsTemperature(model string) bool {
     }
     return true
 }
+
+

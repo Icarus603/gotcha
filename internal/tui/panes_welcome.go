@@ -18,7 +18,7 @@ func (p WelcomePane) Update(msg any) (WelcomePane, func() any) { return p, nil }
 
 func (p WelcomePane) View() string {
     // Title with leading bullet
-    bullet := "◉ "
+    bullet := "[●] "
     title := WelcomeAccent.Render(bullet) + Text.Render("Welcome to ") + Strong.Render("Gotcha") + Text.Render("!")
     // Compute indent equal to visual width of the bullet, align sublines under the title text
     indent := strings.Repeat(" ", runewidth.StringWidth(bullet))

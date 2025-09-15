@@ -9,10 +9,10 @@ import (
     "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/lipgloss"
 
-
     "gotcha/internal/app"
     "gotcha/internal/agent"
     "gotcha/internal/platform"
+    "gotcha/internal/session"
     "gotcha/internal/storage"
     "gotcha/internal/llm"
 )
@@ -23,6 +23,11 @@ type RootModel struct {
     cfg platform.Config
     bus agent.EventBus
     app *app.Service
+
+    // Session management
+    sessionID      string
+    sessionManager *session.Manager
+    sessionContext session.Context
 
     focus int // 0=input,1=notes
 
@@ -40,35 +45,53 @@ type RootModel struct {
 }
 
 func NewRootModel(ctx context.Context, cfg platform.Config) RootModel {
+    // Default behavior for backward compatibility - create a default session
+    sessionManager := session.NewManager()
+    sessionID, _ := sessionManager.CreateNewSession()
+    sessionContext, _ := sessionManager.LoadSession(sessionID)
+
+    return NewRootModelWithSession(ctx, cfg, sessionID, sessionManager, sessionContext)
+}
+
+func NewRootModelWithSession(ctx context.Context, cfg platform.Config, sessionID string, sessionManager *session.Manager, sessionContext session.Context) RootModel {
     bus := agent.NewMemoryBus(64)
     // Storage
     db, _ := storage.Open(cfg.Paths.DBPath())
     _ = storage.Migrate(db)
     service := app.NewService(db, cfg.Paths)
 
-    // Ensure a default session
-    _, _ = service.CreateOrOpenSession(ctx, "dev-session", "Development Session", "")
+    // Ensure session exists in app service
+    _, _ = service.CreateOrOpenSession(ctx, sessionID, "Session", "")
 
-    // LLM client and researcher
+    // LLM client
     llmClient := llmClientFrom(cfg)
-    researcher := agent.NewResearcher(bus, llmClient, service)
 
     rm := RootModel{
         ctx: ctx,
         cfg: cfg,
         bus: bus,
         app: service,
+        sessionID: sessionID,
+        sessionManager: sessionManager,
+        sessionContext: sessionContext,
         welcome: NewWelcomePane(mustCwd()),
-        input: NewInputPaneWithSessionAndLLM(bus, "dev-session", llmClient),
-        notes: NewNotesPaneWithSession(bus, service, "dev-session"),
+        input: NewInputPaneWithSessionAndLLM(bus, sessionID, llmClient),
+        notes: NewNotesPaneWithSession(bus, service, sessionID),
         status: NewStatusPane(),
     }
+
+    // Restore conversation context if exists
+    if len(sessionContext.Conversations) > 0 {
+        rm.input.RestoreConversation(sessionContext.Conversations)
+    }
+
+    // Set note counter
+    rm.notes.SetNoteCount(sessionContext.NoteCount)
+
     // load prompt.md if present
     if b, err := os.ReadFile("prompt.md"); err == nil {
         rm.input.SetSystemPrompt(string(b))
     }
-    // Wire researcher into input pane
-    rm.input.SetResearcher(researcher)
     rm.vp = viewport.New(0, 0)
     rm.mouseEnabled = true
     return rm
@@ -119,13 +142,8 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         switch msg.String() {
         case "tab":
             m.focus = (m.focus + 1) % 2
-        case "ctrl+s":
-            // Toggle focus between Research and Notes
-            if m.focus == 0 { m.focus = 1 } else { m.focus = 0 }
         // Removed F2 toggle; auto detection handles selection vs scroll.
-            case "ctrl+c", "q":
-            return m, tea.Quit
-        }
+            }
     case autoMouseMsg:
         if !m.mouseEnabled {
             m.mouseEnabled = true
@@ -142,9 +160,28 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.updateViewportContent(wasBottom)
     case EventMsg:
         // We no longer show phase counts; ignore agent events for statusline.
-        return m, (&m).subscribeCmd()
+        return m, tea.Batch((&m).subscribeCmd(), m.saveSessionCmd())
+    case SessionSaveMsg:
+        // Session has been saved successfully - no action needed
+        return m, nil
+    case ChatDoneMsg:
+        // Let InputPane handle the message first to stop blinking
+        var cmd tea.Cmd
+        m.input, cmd = m.input.Update(msg)
+        // Then save session context
+        return m, tea.Batch(cmd, m.saveSessionCmd())
+    case UserMessageMsg:
+        // User sent a message - save session context
+        return m, m.saveSessionCmd()
+    case SaveSessionMsg:
+        // Manual save session command
+        return m, m.saveSessionCmd()
+    case SaveTranscriptMsg:
+        // Manual save transcript command
+        return m, m.saveTranscriptCmd()
     }
 
+    // Set focus before updating components so they know their focus state
     if m.focus == 0 { m.input.SetFocused(true); m.notes.SetFocused(false) } else { m.input.SetFocused(false); m.notes.SetFocused(true) }
 
     m.input, cmd = m.input.Update(msg)
@@ -208,12 +245,17 @@ func (m *RootModel) updateViewportContent(stickBottom bool) {
     welcome := m.welcome.View()
     status := m.status.View()
     transcript := m.input.TranscriptViewWithWidth(paneW)
+    indicator := m.input.IndicatorView()
     inputV := ResearchBorder.Copy().Width(paneW).Render(m.input.View())
     commandDropdown := m.input.CommandDropdownView()
     notesV := NotesBorder.Copy().Width(paneW).Render(m.notes.View())
     var content string
     if transcript != "" {
-        if commandDropdown != "" {
+        if indicator != "" && commandDropdown != "" {
+            content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, transcript, indicator, inputV, commandDropdown, notesV)
+        } else if indicator != "" {
+            content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, transcript, indicator, inputV, notesV)
+        } else if commandDropdown != "" {
             content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, transcript, inputV, commandDropdown, notesV)
         } else {
             content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, transcript, inputV, notesV)
@@ -222,7 +264,11 @@ func (m *RootModel) updateViewportContent(stickBottom bool) {
         if stickBottom { m.vp.GotoBottom() }
         return
     }
-    if commandDropdown != "" {
+    if indicator != "" && commandDropdown != "" {
+        content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, indicator, inputV, commandDropdown, notesV)
+    } else if indicator != "" {
+        content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, indicator, inputV, notesV)
+    } else if commandDropdown != "" {
         content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, inputV, commandDropdown, notesV)
     } else {
         content = lipgloss.JoinVertical(lipgloss.Left, welcome, status, inputV, notesV)
@@ -233,6 +279,55 @@ func (m *RootModel) updateViewportContent(stickBottom bool) {
 
 // Auto re-enable mouse after a timeout
 type autoMouseMsg struct{}
+type SessionSaveMsg struct{}
 func (m RootModel) autoReenableMouseCmd(d time.Duration) tea.Cmd {
     return tea.Tick(d, func(time.Time) tea.Msg { return autoMouseMsg{} })
+}
+
+// saveSessionCmd periodically saves the session context
+func (m *RootModel) saveSessionCmd() tea.Cmd {
+    return func() tea.Msg {
+        // Update session context with current conversation and note count
+        conversations := make([]session.ChatMsg, len(m.input.GetConversation()))
+        for i, conv := range m.input.GetConversation() {
+            conversations[i] = session.ChatMsg{Role: conv.Role, Text: conv.Text}
+        }
+
+        m.sessionContext.Conversations = conversations
+        m.sessionContext.NoteCount = m.notes.GetNoteCount()
+
+        // Save session context
+        if err := m.sessionManager.SaveSession(m.sessionID, m.sessionContext); err != nil {
+            // Could log error or handle it, for now just continue
+        }
+
+        return SessionSaveMsg{}
+    }
+}
+
+// saveTranscriptCmd saves the conversation to a transcript.md file
+func (m *RootModel) saveTranscriptCmd() tea.Cmd {
+    return func() tea.Msg {
+        // Update session context with current conversation
+        conversations := make([]session.ChatMsg, len(m.input.GetConversation()))
+        for i, conv := range m.input.GetConversation() {
+            conversations[i] = session.ChatMsg{Role: conv.Role, Text: conv.Text}
+        }
+
+        m.sessionContext.Conversations = conversations
+        m.sessionContext.NoteCount = m.notes.GetNoteCount()
+
+        // Save transcript
+        if err := m.sessionManager.SaveTranscript(m.sessionID, m.sessionContext); err != nil {
+            // Could show error to user, for now just continue
+            return SessionSaveMsg{}
+        }
+
+        // Update last save index
+        if err := m.sessionManager.UpdateLastSaveIndex(m.sessionID, m.sessionContext); err != nil {
+            // Could show error to user, for now just continue
+        }
+
+        return SessionSaveMsg{}
+    }
 }

@@ -8,8 +8,10 @@ import (
     "github.com/charmbracelet/lipgloss"
     "gotcha/internal/agent"
     "gotcha/internal/llm"
+    "gotcha/internal/session"
     "time"
     "encoding/json"
+    "math/rand"
 )
 
 type InputPane struct {
@@ -18,7 +20,6 @@ type InputPane struct {
     bus      agent.EventBus
     sessionID string
     client   llm.Client
-    researcher *agent.Researcher
     output   string
     working  bool
     errText  string
@@ -46,6 +47,9 @@ type InputPane struct {
     // buffer to hold assistant text until completion (non-stream display)
     pendingAssistant string
 
+    // working indicator
+    indicatorFrame int
+    
     // command system
     showCommands    bool
     commandFilter   string
@@ -85,7 +89,6 @@ func NewInputPaneWithSessionAndLLM(bus agent.EventBus, sessionID string, client 
     return p
 }
 
-func (p *InputPane) SetResearcher(r *agent.Researcher) { p.researcher = r }
 func (p *InputPane) SetSystemPrompt(s string) { p.sysPrompt = strings.TrimSpace(s) }
 
 func (p InputPane) Init() tea.Cmd { return textarea.Blink }
@@ -99,7 +102,7 @@ func (p *InputPane) SetSize(paneWidth, paneHeight int) {
     innerW := paneWidth - 4 // 2 border + 2 padding
     if innerW < 10 { innerW = 10 }
     innerH := paneHeight - 2
-    // Keep research content area at least 1 line tall
+    // Keep content area at least 1 line tall
     if innerH < 1 { innerH = 1 }
     p.ta.SetWidth(innerW)
     p.ta.SetHeight(innerH)
@@ -171,10 +174,15 @@ func (p InputPane) Update(msg tea.Msg) (InputPane, tea.Cmd) {
         p.reasonActive = false
         p.toolActive = false
         p.pendingAssistant = ""
+        // Reset indices so old messages don't blink on new streams
+        p.assistantIdx = -1
+        p.toolIdx = -1
+        p.reasonIdx = -1
         return p, nil
     case blinkMsg:
         if p.streaming {
             p.blinkOn = !p.blinkOn
+            p.indicatorFrame++ // Advance indicator animation 
             return p, p.blinkCmd()
         }
         return p, nil
@@ -197,19 +205,6 @@ func (p InputPane) Update(msg tea.Msg) (InputPane, tea.Cmd) {
         if m.String() == "enter" {
             query := p.ta.Value()
             if query == "" { return p, nil }
-            // Command routing: '/research ' prefix triggers research workflow; otherwise do chat.
-            if hasResearchPrefix(query) {
-                q := trimResearchPrefix(query)
-                if p.researcher != nil {
-                    p.researcher.Start(p.sessionIDOrDefault(), q)
-                } else {
-                    agent.StartSimulatedResearch(p.bus, p.sessionIDOrDefault(), q)
-                }
-                var cmd tea.Cmd
-                if p.client != nil { cmd = p.summarizeTaskCmd(q) } else { title := fallbackTitle(q); cmd = func() tea.Msg { return NewTaskMsg{Title: title} } }
-                p.ta.SetValue("")
-                return p, cmd
-            }
             // Chat streaming (default)
             p.appendUser(query)
             p.pendingAssistant = ""
@@ -246,8 +241,7 @@ func (p InputPane) Update(msg tea.Msg) (InputPane, tea.Cmd) {
 }
 
 func (p InputPane) View() string {
-    title := ResearchTitle.Render("Research")
-    return title + "\n" + p.ta.View()
+    return p.ta.View()
 }
 
 // Get command dropdown view (called from root model)
@@ -256,6 +250,11 @@ func (p InputPane) CommandDropdownView() string {
         return p.renderCommandDropdown()
     }
     return ""
+}
+
+// Get indicator view (called from root model)
+func (p InputPane) IndicatorView() string {
+    return p.renderIndicator()
 }
 
 // Render command dropdown menu
@@ -335,36 +334,7 @@ func (p InputPane) ContentLines() int {
     return c
 }
 
-func (p InputPane) sessionIDOrDefault() string {
-    if p.sessionID != "" { return p.sessionID }
-    return "dev-session"
-}
 
-
-func (p InputPane) summarizeTaskCmd(prompt string) tea.Cmd {
-    client := p.client
-    sys := "You summarize user research prompts into a concise 3-7 word task title. Return only the title."
-    req := llm.Request{System: sys, Prompt: prompt, MaxTokens: 32, Temperature: 0.2, Model: ""}
-    return func() tea.Msg {
-        res, err := client.Complete(context.Background(), req, nil)
-        if err != nil { return NewTaskMsg{Title: fallbackTitle(prompt)} }
-        title := res.Text
-        if title == "" { title = fallbackTitle(prompt) }
-        return NewTaskMsg{Title: title}
-    }
-}
-
-func fallbackTitle(s string) string {
-    // naive: capture first ~6 words
-    n := 0
-    out := ""
-    for i := 0; i < len(s); i++ {
-        ch := s[i]
-        out += string(ch)
-        if ch == ' ' { n++; if n == 6 { break } }
-    }
-    return out
-}
 // Streaming helpers
 type chatMsg struct{ Role, Text string }
 
@@ -393,9 +363,9 @@ func (p *InputPane) getCommands() []Command {
             Handler:     nil, // handled in handleCommandKeys
         },
         {
-            Name:        "/research",
-            Description: "Research mode (existing functionality)",
-            Handler:     nil, // handled separately
+            Name:        "/save",
+            Description: "Save current session",
+            Handler:     nil, // handled in handleCommandKeys
         },
         {
             Name:        "/quit",
@@ -408,10 +378,10 @@ func (p *InputPane) getCommands() []Command {
 // Initialize model options
 func (p *InputPane) getModelOptions() []ModelOption {
     return []ModelOption{
-        {"gpt-5-mini minimal", "No reasoning, direct responses", ""},
-        {"gpt-5-mini low", "Light reasoning for simple analysis", "low"},
-        {"gpt-5-mini medium", "Moderate reasoning for complex problems", "medium"},
-        {"gpt-5-mini high", "Deep reasoning for difficult tasks", "high"},
+        {"gpt-5-mini minimal", "fastest responses with limited reasoning", ""},
+        {"gpt-5-mini low", "balances speed with some reasoning", "low"},
+        {"gpt-5-mini medium", "provides a solid balance of reasoning depth and latency", "medium"},
+        {"gpt-5-mini high", "maximizes reasoning depth for complex or ambiguous problems", "high"},
     }
 }
 
@@ -428,6 +398,13 @@ func (p *InputPane) handleModelCommand() tea.Cmd {
         }
     }
     return nil
+}
+
+// Handle /save command
+func (p *InputPane) handleSaveCommand() tea.Cmd {
+    return func() tea.Msg {
+        return SaveTranscriptMsg{}
+    }
 }
 
 // Get current reasoning effort setting
@@ -486,7 +463,12 @@ func (p *InputPane) handleCommandKeys(msg tea.KeyMsg) (*InputPane, tea.Cmd) {
                 switch cmd.Name {
                 case "/model":
                     p.showCommands = false
+                    p.ta.SetValue("")
                     return p, p.handleModelCommand()
+                case "/save":
+                    p.showCommands = false
+                    p.ta.SetValue("")
+                    return p, p.handleSaveCommand()
                 case "/quit":
                     return p, tea.Quit
                 }
@@ -535,7 +517,16 @@ func (p *InputPane) getFilteredCommands() []Command {
 
 func (p *InputPane) startChatStreamCmd(user string) tea.Cmd {
     sys := p.systemPrompt()
-    req := llm.Request{System: sys, Prompt: user, MaxTokens: 600}
+    
+    // Build conversation history (only user/assistant messages)
+    var history []llm.ConversationMessage
+    for _, msg := range p.convo {
+        if msg.Role == "user" || msg.Role == "assistant" {
+            history = append(history, llm.ConversationMessage{Role: msg.Role, Text: msg.Text})
+        }
+    }
+    
+    req := llm.Request{System: sys, Prompt: user, ConversationHistory: history, MaxTokens: 600}
     // Allow model to use web_search tool automatically
     req.Tools = []map[string]any{{"type": "web_search"}}
     req.ToolChoice = "auto"
@@ -574,7 +565,7 @@ func (p InputPane) subscribeStreamCmd(ch <-chan string, errCh <-chan error) tea.
 type blinkMsg struct{}
 func (p InputPane) blinkCmd() tea.Cmd {
     if !p.streaming { return nil }
-    return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return blinkMsg{} })
+    return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return blinkMsg{} })
 }
 
 
@@ -594,7 +585,7 @@ func (p InputPane) TranscriptLines() int {
 func (p InputPane) TranscriptViewWithWidth(width int) string {
     if len(p.convo) == 0 { return "" }
     rows := make([]string, 0, len(p.convo)*2)
-    for i, m := range p.convo {
+    for _, m := range p.convo {
         switch m.Role {
         case "user":
             prefix := Gray.Render("> ")
@@ -602,12 +593,11 @@ func (p InputPane) TranscriptViewWithWidth(width int) string {
             if contentW < 4 { contentW = width }
             row := lipgloss.JoinHorizontal(lipgloss.Top,
                 prefix,
-                lipgloss.NewStyle().Width(contentW).Render(Text.Render(m.Text)),
+                lipgloss.NewStyle().Width(contentW).Render(Gray.Render(m.Text)),
             )
             rows = append(rows, row)
         case "assistant":
             dot := "⏺"
-            if p.streaming && i == p.assistantIdx { if !p.blinkOn { dot = " " } }
             prefix := White.Render(dot+" ")
             contentW := width - lipgloss.Width(prefix)
             if contentW < 4 { contentW = width }
@@ -618,7 +608,6 @@ func (p InputPane) TranscriptViewWithWidth(width int) string {
             rows = append(rows, row)
         case "tool":
             dot := "⏺"
-            if p.streaming && p.toolActive && i == p.toolIdx { if !p.blinkOn { dot = " " } }
             prefix := lipgloss.NewStyle().Foreground(colorPrimary).Render(dot+" ")
             contentW := width - lipgloss.Width(prefix)
             label := Strong.Render("Web Search")
@@ -630,9 +619,8 @@ func (p InputPane) TranscriptViewWithWidth(width int) string {
             )
             rows = append(rows, row)
         case "reason":
-            // Thinking header with blinking dot
-            dot := "◉"
-            if p.streaming && p.reasonActive && i == p.reasonIdx { if !p.blinkOn { dot = " " } }
+            // Thinking header with static dot
+            dot := "⏺"
             prefix := Gray.Render(dot+" ")
             contentW := width - lipgloss.Width(prefix)
             if contentW < 4 { contentW = width }
@@ -660,10 +648,10 @@ func (p InputPane) systemPrompt() string {
         return p.sysPrompt
     }
     // Fallback if prompt.md wasn't loaded
-    return `You are a research assistant helping users find information and analyze complex topics through a terminal interface.
+    return `You are an AI assistant helping users through a terminal interface.
 
 Role & Capabilities
-- Research agent: Your primary strength is finding, synthesizing, and analyzing information
+- AI assistant: Your primary strength is helping with various tasks, answering questions, and providing information
 - You have access to web search and reasoning capabilities
 - Help users discover insights, compare options, and understand complex topics
 
@@ -738,16 +726,59 @@ func findQuery(v any) string {
 }
 
 
-func hasResearchPrefix(s string) bool {
-    v := s
-    for len(v) > 0 && (v[0] == ' ' || v[0] == '\n' || v[0] == '\t') { v = v[1:] }
-    return len(v) >= 9 && (v[:9] == "/research" || (len(v) >= 2 && v[:2] == "/r"))
+
+// RestoreConversation restores a previous conversation from session data
+func (p *InputPane) RestoreConversation(conversations []session.ChatMsg) {
+    p.convo = make([]chatMsg, len(conversations))
+    for i, conv := range conversations {
+        p.convo[i] = chatMsg{Role: conv.Role, Text: conv.Text}
+    }
 }
 
-func trimResearchPrefix(s string) string {
-    v := s
-    for len(v) > 0 && (v[0] == ' ' || v[0] == '\n' || v[0] == '\t') { v = v[1:] }
-    if strings.HasPrefix(v, "/research") { v = strings.TrimSpace(v[len("/research"):]) }
-    if strings.HasPrefix(v, "/r") { v = strings.TrimSpace(v[len("/r"):]) }
-    return v
+// GetConversation returns the current conversation for session saving
+func (p *InputPane) GetConversation() []chatMsg {
+    return p.convo
+}
+
+// Working indicator functions
+func (p *InputPane) getIndicatorBall() string {
+    frames := []string{
+        "[●    ]",
+        "[ ●   ]",
+        "[  ●  ]",
+        "[   ● ]",
+        "[    ●]",
+        "[   ● ]",
+        "[  ●  ]",
+        "[ ●   ]",
+    }
+    return frames[p.indicatorFrame%len(frames)]
+}
+
+func (p *InputPane) getIndicatorText() string {
+    texts := []string{
+        "Spelunking…", "Archaeologizing…", "Cryptohunting…", "Questifying…", "Mystifying…",
+        "Enigmatizing…", "Riddling…", "Puzzlefying…", "Codebreaking…", "Secretizing…",
+        "Whispertracking…", "Shadowdancing…", "Timebending…", "Mindreading…", "Truthseeking…",
+        "Dreamweaving…", "Thoughtdigging…", "Memorysifting…", "Ideachasing…", "Wisdomhunting…",
+        "Neuronspinning…", "Brainstitching…", "Synapsehopping…", "Cognitiondiving…", "Insightmining…",
+        "Galaxysurfing…", "Starwhispering…", "Cosmosprobing…", "Universesearching…", "Dimensionhopping…",
+        "Algorithmdancing…", "Databending…", "Logictwisting…", "Patternweaving…", "Codewhispering…",
+        "Infinitywalking…", "Paradoxsolving…", "Quantumleaping…", "Realityhacking…", "Matrixdiving…",
+        "Treasuremystifying…", "Artifactwhispering…", "Relicchasing…", "Fossilmining…", "Antiquehunting…",
+        "Soulreading…", "Spirittracking…", "Essencehunting…", "Vibrationfeeling…", "Energysurfing…",
+        "Moonwalking…", "Starhopping…", "Cloudweaving…", "Rainbowchasing…", "Thunderlistening…",
+        "Magicspelling…", "Wizardwhistling…", "Spellcrafting…", "Enchantweaving…", "Potionbrewing…",
+    }
+    // Pick random word each time
+    return texts[rand.Intn(len(texts))]
+}
+
+func (p *InputPane) renderIndicator() string {
+    if !p.streaming {
+        return ""
+    }
+    ball := p.getIndicatorBall()
+    text := p.getIndicatorText()
+    return WelcomeAccent.Render(ball + " " + text)
 }

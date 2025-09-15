@@ -11,12 +11,19 @@ type Request struct {
     Temperature float64
     Stop        []string
     Model       string
+    // Optional: conversation history for context
+    ConversationHistory []ConversationMessage
     // Optional tool usage (Responses API)
     Tools       []map[string]any
     ToolChoice  string
     Include     []string
     ReasoningEffort  string // low|medium|high
     ReasoningSummary string // e.g., auto|concise|detailed
+}
+
+type ConversationMessage struct {
+    Role string // "user" or "assistant" (skip tool/reason for API)
+    Text string
 }
 
 type Response struct {
