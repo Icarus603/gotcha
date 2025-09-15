@@ -43,7 +43,7 @@
 
 ```bash
 # Clone the repository
-git clone git@github.com:Icarus603/gotcha.git
+gh repo clone Icarus603/gotcha
 cd gotcha
 
 # Build the binary
