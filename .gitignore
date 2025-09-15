@@ -16,3 +16,9 @@ vendor/
 
 # Environment files
 .env
+
+# Project specific
+.gocache
+.gomodcache
+.gotcha
+gotcha

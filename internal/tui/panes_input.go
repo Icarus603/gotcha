@@ -122,21 +122,29 @@ func (p InputPane) Update(msg tea.Msg) (InputPane, tea.Cmd) {
         if strings.HasPrefix(m.Delta, "\x00WEBSEARCH:") {
             payload := strings.TrimPrefix(m.Delta, "\x00WEBSEARCH:")
             q := extractQuery(payload)
-            if !p.toolActive {
+            // Check if we need to start a new search phase
+            if !p.toolActive || p.shouldStartNewSearchPhase(q) {
                 p.toolActive = true
                 if q == "" { p.toolBuffer = "Searching…" } else { p.toolBuffer = q }
                 p.convo = append(p.convo, chatMsg{Role: "tool", Text: p.toolBuffer})
                 p.toolIdx = len(p.convo) - 1
             } else {
-                if q != "" { p.toolBuffer = q }
+                // Update the search display with more detailed information
+                if q != "" && q != "Searching…" {
+                    // If we have a better query, update the buffer
+                    if len(q) > len(p.toolBuffer) || (p.toolBuffer == "Searching…") {
+                        p.toolBuffer = q
+                    }
+                }
                 if p.toolIdx >= 0 && p.toolIdx < len(p.convo) {
                     if p.toolBuffer == "" { p.convo[p.toolIdx].Text = "Searching…" } else { p.convo[p.toolIdx].Text = p.toolBuffer }
                 }
             }
         } else if strings.HasPrefix(m.Delta, "\x00REASON:") {
             content := strings.TrimPrefix(m.Delta, "\x00REASON:")
-            if !p.reasonActive {
-                // First reasoning output - create reason message
+            // Check if we need to start a new reasoning phase
+            if !p.reasonActive || p.shouldStartNewReasoningPhase(content) {
+                // Create new reasoning message for each distinct phase
                 p.reasonActive = true
                 p.convo = append(p.convo, chatMsg{Role: "reason", Text: ""})
                 p.reasonIdx = len(p.convo) - 1
@@ -191,36 +199,70 @@ func (p InputPane) Update(msg tea.Msg) (InputPane, tea.Cmd) {
     case tea.KeyMsg:
         if !p.focused { break }
 
-        // Handle command system first
-        if p.showCommands || p.commandMode != "" {
-            newP, cmd := p.handleCommandKeys(m)
-            return *newP, cmd
+        // Special handling for "/" to enable commands immediately
+        if m.String() == "/" && p.ta.Value() == "" {
+            // Update text area and command state together
+            var cmd tea.Cmd
+            p.ta, cmd = p.ta.Update(msg)
+            p.showCommands = true
+            p.commandFilter = p.ta.Value()
+            p.selectedCmd = 0
+            return p, cmd
         }
 
-        // Shift+Enter inserts newline; also support alt+enter/ctrl+j as fallbacks.
+        // Handle command system first
+        if p.showCommands || p.commandMode != "" {
+            newP, cmdKey := p.handleCommandKeys(m)
+            return *newP, cmdKey
+        }
+
+        // Shift+Enter inserts newline
         if m.String() == "shift+enter" || m.String() == "alt+enter" || m.String() == "ctrl+j" {
             p.ta.SetValue(p.ta.Value() + "\n")
             return p, nil
         }
 
-
         if m.String() == "enter" {
+            // Check if input is empty BEFORE processing Enter
+            if strings.TrimSpace(p.ta.Value()) == "" {
+                return p, nil
+            }
+
+            // FIRST update text area to get the latest typed content
+            p.ta, _ = p.ta.Update(msg)
+
             query := p.ta.Value()
             if query == "" { return p, nil }
+
+            // Check for slash commands immediately
+            if strings.HasPrefix(query, "/") {
+                p.ta.SetValue("") // Clear input
+
+                if query == "/model" {
+                    return p, p.handleModelCommand()
+                }
+                if query == "/save" {
+                    return p, p.handleSaveCommand()
+                }
+                if query == "/quit" {
+                    return p, tea.Quit
+                }
+            }
+
             // Chat streaming (default)
             p.appendUser(query)
             p.pendingAssistant = ""
             // Reset all streaming state
             p.reasonActive = false
             p.toolActive = false
-            p.assistantIdx = -1  // No assistant message yet
+            p.assistantIdx = -1
             p.ta.SetValue("")
             if p.client == nil {
                 p.appendAssistant("(No LLM configured)")
                 return p, nil
             }
-            cmd := p.startChatStreamCmd(query)
-            return p, cmd
+            chatCmd := p.startChatStreamCmd(query)
+            return p, chatCmd
         }
     // Mouse wheel scrolling is handled by the page-level viewport
     }
@@ -651,10 +693,11 @@ func (p InputPane) systemPrompt() string {
 
 // Best-effort extraction of a query string from streaming tool payload.
 // The payload may be a JSON object; we try to pull `query` if present,
-// otherwise fallback to raw text.
+// otherwise fallback to raw text or partial payload information.
 func extractQuery(payload string) string {
     payload = strings.TrimSpace(payload)
     if payload == "" { return "" }
+
     // Best effort: parse JSON and search for "query" key anywhere.
     var any map[string]any
     if payload != "" && payload[0] == '{' {
@@ -662,7 +705,8 @@ func extractQuery(payload string) string {
             if q := findQuery(any); q != "" { return q }
         }
     }
-    // Fallback simple scan
+
+    // Fallback simple scan for quoted query
     if idx := strings.Index(payload, "\"query\""); idx >= 0 {
         s := payload[idx+7:]
         if qstart := strings.Index(s, ":"); qstart >= 0 {
@@ -673,6 +717,36 @@ func extractQuery(payload string) string {
             }
         }
     }
+
+    // More aggressive fallbacks for different payload formats
+    // Look for common search patterns
+    if strings.Contains(payload, "search") || strings.Contains(payload, "query") {
+        // If payload is readable text (not just JSON fragments), show it
+        if len(payload) > 0 && len(payload) < 200 && !strings.Contains(payload, "\\") {
+            // Clean up the payload for display
+            cleaned := strings.ReplaceAll(payload, "\"", "")
+            cleaned = strings.ReplaceAll(cleaned, "{", "")
+            cleaned = strings.ReplaceAll(cleaned, "}", "")
+            cleaned = strings.TrimSpace(cleaned)
+            if cleaned != "" && cleaned != "search" && cleaned != "query" {
+                return cleaned
+            }
+        }
+    }
+
+    // Final fallback - if payload has meaningful content, show part of it
+    if len(payload) > 10 && len(payload) < 100 {
+        // Remove obvious JSON noise
+        cleaned := strings.ReplaceAll(payload, "\"", "")
+        cleaned = strings.ReplaceAll(cleaned, "{", "")
+        cleaned = strings.ReplaceAll(cleaned, "}", "")
+        cleaned = strings.ReplaceAll(cleaned, ":", " ")
+        cleaned = strings.TrimSpace(cleaned)
+        if len(cleaned) > 5 {
+            return cleaned
+        }
+    }
+
     return "Searching…"
 }
 
@@ -754,4 +828,76 @@ func (p *InputPane) renderIndicator() string {
     ball := p.getIndicatorBall()
     text := p.getIndicatorText()
     return WelcomeAccent.Render(ball + " " + text)
+}
+
+// shouldStartNewReasoningPhase determines if we should create a new reasoning section
+// instead of appending to the existing one, based on content patterns
+func (p *InputPane) shouldStartNewReasoningPhase(content string) bool {
+    // If we have existing reasoning content, check for new phase indicators
+    if p.reasonIdx >= 0 && p.reasonIdx < len(p.convo) {
+        existingText := p.convo[p.reasonIdx].Text
+
+        // Start new phase if current reasoning section is substantial (>200 chars)
+        // and new content looks like a fresh start
+        if len(existingText) > 200 {
+            trimmedContent := strings.TrimSpace(content)
+
+            // Check for typical new reasoning phase indicators
+            freshStartPatterns := []string{
+                "Looking at", "Let me", "I need to", "Now I", "Based on",
+                "Analyzing", "Considering", "Given the", "After searching",
+                "The search", "From the results", "Next, I", "Now let me",
+            }
+
+            for _, pattern := range freshStartPatterns {
+                if strings.HasPrefix(trimmedContent, pattern) {
+                    return true
+                }
+            }
+
+            // Also check if we switched from search back to reasoning
+            // by looking at recent conversation history
+            if len(p.convo) > 1 {
+                lastMsg := p.convo[len(p.convo)-2] // Second to last message
+                if lastMsg.Role == "tool" { // Previous message was a search
+                    return true
+                }
+            }
+        }
+    }
+
+    return false
+}
+
+// shouldStartNewSearchPhase determines if we should create a new search section
+// instead of updating the existing one, based on query differences
+func (p *InputPane) shouldStartNewSearchPhase(newQuery string) bool {
+    // If we have an existing search active and it's different from new query
+    if p.toolIdx >= 0 && p.toolIdx < len(p.convo) {
+        currentText := p.convo[p.toolIdx].Text
+        trimmedNewQuery := strings.TrimSpace(newQuery)
+
+        // Start new search if:
+        // 1. New query is significantly different from current buffer
+        // 2. Current search appears to be complete (contains results or URLs)
+        if trimmedNewQuery != "" && trimmedNewQuery != p.toolBuffer {
+            // Check if current search contains results (URLs, structured content)
+            if strings.Contains(currentText, "http") ||
+               strings.Contains(currentText, "results") ||
+               len(currentText) > 100 { // Substantial content suggests completed search
+                return true
+            }
+        }
+
+        // Also check conversation context - if last message was reasoning,
+        // this might be a new search iteration
+        if len(p.convo) > 1 {
+            lastMsg := p.convo[len(p.convo)-2]
+            if lastMsg.Role == "reason" && len(lastMsg.Text) > 50 {
+                return true
+            }
+        }
+    }
+
+    return false
 }

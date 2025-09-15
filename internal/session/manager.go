@@ -293,25 +293,137 @@ func (m *Manager) SaveTranscript(sessionID string, context Context) error {
 		return fmt.Errorf("failed to write section header: %w", err)
 	}
 
-	// Write new conversations
-	for _, msg := range newConversations {
-		var roleLabel string
-		switch msg.Role {
-		case "user":
-			roleLabel = "**You:**"
-		case "assistant":
-			roleLabel = "**Assistant:**"
-		default:
-			roleLabel = fmt.Sprintf("**%s:**", strings.Title(msg.Role))
-		}
+	// Generate intelligent structured summary instead of raw conversation dump
+	summary, err := m.generateIntelligentSummary(newConversations)
+	if err != nil {
+		// Fallback to basic conversation format if summary generation fails
+		for _, msg := range newConversations {
+			var roleLabel string
+			switch msg.Role {
+			case "user":
+				roleLabel = "**You:**"
+			case "assistant":
+				roleLabel = "**Assistant:**"
+			default:
+				roleLabel = fmt.Sprintf("**%s:**", strings.Title(msg.Role))
+			}
 
-		conversation := fmt.Sprintf("%s\n%s\n\n", roleLabel, msg.Text)
-		if _, err := file.WriteString(conversation); err != nil {
-			return fmt.Errorf("failed to write conversation: %w", err)
+			conversation := fmt.Sprintf("%s\n%s\n\n", roleLabel, msg.Text)
+			if _, err := file.WriteString(conversation); err != nil {
+				return fmt.Errorf("failed to write conversation: %w", err)
+			}
+		}
+	} else {
+		// Write the intelligent summary
+		if _, err := file.WriteString(summary); err != nil {
+			return fmt.Errorf("failed to write intelligent summary: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// generateIntelligentSummary creates a structured summary of conversations instead of raw dumps
+func (m *Manager) generateIntelligentSummary(conversations []ChatMsg) (string, error) {
+	if len(conversations) == 0 {
+		return "", fmt.Errorf("no conversations to summarize")
+	}
+
+	var summary strings.Builder
+
+	// Find user queries and assistant responses
+	var queries []string
+	var insights []string
+	var sources []string
+
+	for _, msg := range conversations {
+		switch msg.Role {
+		case "user":
+			// Extract main queries
+			if len(msg.Text) > 10 { // Ignore very short messages
+				queries = append(queries, strings.TrimSpace(msg.Text))
+			}
+		case "assistant":
+			// Extract key insights from assistant responses
+			if len(msg.Text) > 50 {
+				// Look for structured information, URLs, or key findings
+				text := msg.Text
+				if strings.Contains(text, "http") {
+					// Extract URLs as sources
+					lines := strings.Split(text, "\n")
+					for _, line := range lines {
+						if strings.Contains(line, "http") {
+							sources = append(sources, strings.TrimSpace(line))
+						}
+					}
+				}
+				// Look for bullet points or structured findings
+				if strings.Contains(text, "•") || strings.Contains(text, "-") {
+					lines := strings.Split(text, "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if (strings.HasPrefix(line, "•") || strings.HasPrefix(line, "-")) && len(line) > 5 {
+							insights = append(insights, line)
+						}
+					}
+				}
+			}
+		case "tool":
+			// Capture search queries as context
+			if len(msg.Text) > 5 && !strings.Contains(msg.Text, "Searching") {
+				insights = append(insights, "🔍 "+msg.Text)
+			}
+		}
+	}
+
+	// Build structured summary
+	summary.WriteString("## Session Summary\n\n")
+
+	// User Queries section
+	if len(queries) > 0 {
+		summary.WriteString("### Questions Asked\n")
+		for _, q := range queries {
+			if len(q) > 100 {
+				// Truncate long queries
+				q = q[:100] + "..."
+			}
+			summary.WriteString(fmt.Sprintf("- %s\n", q))
+		}
+		summary.WriteString("\n")
+	}
+
+	// Key Findings section
+	if len(insights) > 0 {
+		summary.WriteString("### Key Findings\n")
+		for _, insight := range insights {
+			if len(insight) > 200 {
+				// Truncate very long insights
+				insight = insight[:200] + "..."
+			}
+			summary.WriteString(fmt.Sprintf("%s\n", insight))
+		}
+		summary.WriteString("\n")
+	}
+
+	// Sources section
+	if len(sources) > 0 {
+		summary.WriteString("### Sources & References\n")
+		seen := make(map[string]bool)
+		for _, source := range sources {
+			if !seen[source] && len(source) > 5 {
+				summary.WriteString(fmt.Sprintf("- %s\n", source))
+				seen[source] = true
+			}
+		}
+		summary.WriteString("\n")
+	}
+
+	// Add session metadata
+	summary.WriteString("### Session Details\n")
+	summary.WriteString(fmt.Sprintf("- Messages: %d\n", len(conversations)))
+	summary.WriteString(fmt.Sprintf("- Timestamp: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+
+	return summary.String(), nil
 }
 
 // UpdateLastSaveIndex updates the context to mark conversations as saved
