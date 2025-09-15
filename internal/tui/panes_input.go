@@ -380,10 +380,10 @@ func (p *InputPane) getCommands() []Command {
 // Initialize model options
 func (p *InputPane) getModelOptions() []ModelOption {
     return []ModelOption{
-        {"gpt-5-mini minimal", "think less", "minimal"},
-        {"gpt-5-mini low", "think", "low"},
-        {"gpt-5-mini medium", "think hard", "medium"},
-        {"gpt-5-mini high", "ultrathink", "high"},
+        {"gpt-5-mini minimal", "fastest responses with limited reasoning", "minimal"},
+        {"gpt-5-mini low", "balances speed with some reasoning", "low"},
+        {"gpt-5-mini medium", "provides a solid balance of reasoning depth and latency", "medium"},
+        {"gpt-5-mini high", "maximizes reasoning depth", "high"},
     }
 }
 
