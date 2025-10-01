@@ -69,6 +69,9 @@ func NewInputPane(bus agent.EventBus) InputPane { // deprecated constructor kept
 	ta.Placeholder = "Ask your agent to look into something. Enter submit. Shift+Enter newline."
 	ta.Prompt = ""
 	ta.ShowLineNumbers = false
+	ta.CharLimit = 0
+	ta.MaxHeight = 0
+	ta.MaxWidth = 0
 	// Remove cursor line background to match app background
 	f, b := textarea.DefaultStyles()
 	f.CursorLine = lipgloss.NewStyle()
@@ -639,7 +642,7 @@ func (p *InputPane) startChatStreamCmd(user string) tea.Cmd {
 		}
 	}
 
-	req := llm.Request{System: sys, Prompt: user, ConversationHistory: history, MaxTokens: 600}
+	req := llm.Request{System: sys, Prompt: user, ConversationHistory: history}
 	// Allow model to use web_search tool automatically
 	req.Tools = []map[string]any{{"type": "web_search"}}
 	req.ToolChoice = "auto"

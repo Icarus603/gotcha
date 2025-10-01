@@ -30,6 +30,9 @@ func NewNotesPane(bus agent.EventBus) NotesPane {
 	ta.Placeholder = "Take notes here. Enter saves. Shift+Enter newline."
 	ta.ShowLineNumbers = false
 	ta.Prompt = ""
+	ta.CharLimit = 0
+	ta.MaxHeight = 0
+	ta.MaxWidth = 0
 	// Remove cursor line background to match app background
 	f, b := textarea.DefaultStyles()
 	f.CursorLine = lipgloss.NewStyle()
