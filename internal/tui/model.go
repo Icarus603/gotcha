@@ -270,9 +270,9 @@ func (m *RootModel) updateViewportContent(stickBottom bool) {
 	status := m.status.View()
 	transcript := m.input.TranscriptViewWithWidth(paneW)
 	indicator := m.input.IndicatorView()
-	inputV := ResearchBorder.Copy().Width(paneW).Render(m.input.View())
+	inputV := ResearchBorder.Render(m.input.View())
 	commandDropdown := m.input.CommandDropdownView()
-	notesV := NotesBorder.Copy().Width(paneW).Render(m.notes.View())
+	notesV := NotesBorder.Render(m.notes.View())
 	var content string
 	if transcript != "" {
 		if indicator != "" && commandDropdown != "" {
